@@ -2,11 +2,8 @@
 # -*- coding: utf-8 -*-
 import json
 import math
-import urllib.request
-import urllib.parse
-import urllib.error
-
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt, QVariant, QEventLoop, QTimer, QUrl, QByteArray
+from qgis.PyQt.QtNetwork import QNetworkRequest, QNetworkReply
 from qgis.PyQt.QtWidgets import (
     QAction, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QLineEdit, QPushButton, QMessageBox, QSpinBox, QCheckBox, QProgressBar,
@@ -15,7 +12,8 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsFeature, QgsGeometry, QgsPointXY,
     QgsField, QgsFields, QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform, QgsWkbTypes, QgsVectorFileWriter
+    QgsCoordinateTransform, QgsWkbTypes, QgsVectorFileWriter,
+    QgsNetworkAccessManager
 )
 
 class POICollectorDialog(QDialog):
@@ -167,6 +165,42 @@ class POICollectorDialog(QDialog):
         b = geom.boundingBox()
         return geom, (b.xMinimum(), b.yMinimum(), b.xMaximum(), b.yMaximum())
 
+    def _network_post(self, url, payload, headers, timeout_ms=60000, error_prefix="Network request"):
+        request = QNetworkRequest(QUrl(url))
+        for name, value in headers.items():
+            request.setRawHeader(QByteArray(name), QByteArray(value))
+
+        manager = QgsNetworkAccessManager.instance()
+        reply = manager.post(request, payload)
+        loop = QEventLoop()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        reply.finished.connect(loop.quit)
+        timer.start(timeout_ms)
+        loop.exec_()
+
+        if not timer.isActive():
+            reply.abort()
+            reply.deleteLater()
+            raise Exception(f"{error_prefix} timed out after {timeout_ms // 1000} seconds.")
+
+        timer.stop()
+        status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        body = bytes(reply.readAll())
+        error_code = reply.error()
+        error_text = reply.errorString()
+        reply.deleteLater()
+
+        if error_code != QNetworkReply.NoError:
+            detail = body.decode("utf-8", errors="ignore").strip()
+            status_text = f" HTTP {status}" if status else ""
+            if detail:
+                raise Exception(f"{error_prefix}{status_text}: {detail[:400]}")
+            raise Exception(f"{error_prefix}{status_text}: {error_text}")
+
+        return body
+
     def _fetch_osm(self, bbox, category):
         xmin, ymin, xmax, ymax = bbox
         # Map friendly names to OSM tags
@@ -202,14 +236,19 @@ class POICollectorDialog(QDialog):
         );
         out center tags;
         """
-        data = urllib.parse.urlencode({"data": query}).encode("utf-8")
-        req = urllib.request.Request(
+        data = QUrl.toPercentEncoding(query)
+        payload = QByteArray(b"data=") + data
+        headers = {
+            b"Content-Type": b"application/x-www-form-urlencoded; charset=UTF-8",
+            b"User-Agent": b"GeoPOI-Collector/1.0.4"
+        }
+        raw_response = self._network_post(
             "https://overpass-api.de/api/interpreter",
-            data=data,
-            headers={"User-Agent": "QGIS-POI-Collector/1.0"}
+            payload,
+            headers,
+            timeout_ms=90000
         )
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            obj = json.loads(resp.read().decode("utf-8"))
+        obj = json.loads(raw_response.decode("utf-8"))
 
         out = []
         for el in obj.get("elements", []):
@@ -303,23 +342,20 @@ class POICollectorDialog(QDialog):
                     }
                 }
             }
-            raw = json.dumps(body).encode("utf-8")
-            req = urllib.request.Request(
+            raw = QByteArray(json.dumps(body).encode("utf-8"))
+            headers = {
+                b"Content-Type": b"application/json",
+                b"X-Goog-Api-Key": api_key.encode("utf-8"),
+                b"X-Goog-FieldMask": b"places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.primaryType"
+            }
+            raw_response = self._network_post(
                 "https://places.googleapis.com/v1/places:searchNearby",
-                data=raw,
-                method="POST",
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Goog-Api-Key": api_key,
-                    "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.primaryType"
-                }
+                raw,
+                headers,
+                timeout_ms=60000,
+                error_prefix="Google Places"
             )
-            try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    obj = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode("utf-8", errors="ignore")
-                raise Exception(f"Google Places error {e.code}: {detail[:400]}")
+            obj = json.loads(raw_response.decode("utf-8"))
 
             for p in obj.get("places", []):
                 loc = p.get("location", {})

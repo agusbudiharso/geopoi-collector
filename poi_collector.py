@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import json
 import math
@@ -16,24 +15,51 @@ from qgis.core import (
     QgsNetworkAccessManager
 )
 
+
 class POICollectorDialog(QDialog):
+    POINT_CATEGORIES = [
+        "hospital", "clinic", "pharmacy", "school", "university",
+        "place_of_worship", "bank", "atm", "restaurant", "cafe",
+        "marketplace", "fuel", "police", "fire_station", "government",
+        "hotel", "tourism"
+    ]
+
+    LINE_CATEGORIES = [
+        "roads", "rivers", "railways", "paths", "coastline"
+    ]
+
+    POLYGON_CATEGORIES = [
+        "buildings", "landuse", "water", "forest", "residential",
+        "industrial", "commercial", "park"
+    ]
+
     def __init__(self, iface, parent=None):
         super().__init__(parent)
         self.iface = iface
         self.setWindowTitle("GeoPOI Collector")
-        self.resize(560, 420)
+        self.resize(590, 500)
 
         layout = QVBoxLayout(self)
 
         layout.addWidget(QLabel(
             "<b>GeoPOI Collector</b><br>"
-            "Collect Points of Interest from OpenStreetMap or Google Places API."
+            "Collect Point, Line, and Polygon features from OpenStreetMap; "
+            "Google Places remains available for Point features."
         ))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Geometry type:"))
+        self.geometry_type = QComboBox()
+        self.geometry_type.addItems(["Point", "Line", "Polygon"])
+        self.geometry_type.currentIndexChanged.connect(self._update_mode_ui)
+        row.addWidget(self.geometry_type)
+        layout.addLayout(row)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Provider:"))
         self.provider = QComboBox()
         self.provider.addItems(["OpenStreetMap (Overpass)", "Google Places API"])
+        self.provider.currentIndexChanged.connect(self._update_provider_ui)
         row.addWidget(self.provider)
         layout.addLayout(row)
 
@@ -47,34 +73,15 @@ class POICollectorDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("Category:"))
         self.category = QComboBox()
-        self.category.addItems([
-            "hospital",
-            "clinic",
-            "pharmacy",
-            "school",
-            "university",
-            "place_of_worship",
-            "bank",
-            "atm",
-            "restaurant",
-            "cafe",
-            "marketplace",
-            "fuel",
-            "police",
-            "fire_station",
-            "government",
-            "hotel",
-            "tourism"
-        ])
         row.addWidget(self.category)
         layout.addLayout(row)
 
-        layout.addWidget(QLabel(
-            "<small>Select a POI category from the list.</small>"
-        ))
+        self.category_note = QLabel()
+        layout.addWidget(self.category_note)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Google API Key:"))
+        self.api_label = QLabel("Google API Key:")
+        row.addWidget(self.api_label)
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Required only for Google Places")
@@ -82,7 +89,8 @@ class POICollectorDialog(QDialog):
         layout.addLayout(row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Google radius per grid (meters):"))
+        self.radius_label = QLabel("Google radius per grid (meters):")
+        row.addWidget(self.radius_label)
         self.radius = QSpinBox()
         self.radius.setRange(500, 50000)
         self.radius.setValue(3000)
@@ -90,7 +98,7 @@ class POICollectorDialog(QDialog):
         row.addWidget(self.radius)
         layout.addLayout(row)
 
-        self.only_inside = QCheckBox("Remove points outside the search area")
+        self.only_inside = QCheckBox("Clip/filter results to the search area")
         self.only_inside.setChecked(True)
         layout.addWidget(self.only_inside)
 
@@ -112,14 +120,42 @@ class POICollectorDialog(QDialog):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
 
-        self.btn = QPushButton("Collect POI")
+        self.btn = QPushButton("Collect Features")
         self.btn.clicked.connect(self.run_fetch)
         layout.addWidget(self.btn)
 
         layout.addWidget(QLabel(
-            "<small>Catatan: OpenStreetMap cocok untuk pengumpulan data terbuka. "
-            "Google Places memerlukan API key milik Anda dan tunduk pada ketentuan Google Maps Platform.</small>"
+            "<small>OpenStreetMap/Overpass is used for Point, Line, and Polygon features. "
+            "Google Places supports Point features only and requires your own API key.</small>"
         ))
+
+        self._update_mode_ui()
+
+    def _update_mode_ui(self):
+        geom = self.geometry_type.currentText()
+        self.category.clear()
+        if geom == "Point":
+            self.category.addItems(self.POINT_CATEGORIES)
+            self.category_note.setText("<small>Select a POI category.</small>")
+            self.provider.setEnabled(True)
+        elif geom == "Line":
+            self.category.addItems(self.LINE_CATEGORIES)
+            self.category_note.setText("<small>Line features are collected from OpenStreetMap/Overpass.</small>")
+            self.provider.setCurrentIndex(0)
+            self.provider.setEnabled(False)
+        else:
+            self.category.addItems(self.POLYGON_CATEGORIES)
+            self.category_note.setText("<small>Polygon features are collected from closed OpenStreetMap ways.</small>")
+            self.provider.setCurrentIndex(0)
+            self.provider.setEnabled(False)
+        self._update_provider_ui()
+
+    def _update_provider_ui(self):
+        google = self.geometry_type.currentText() == "Point" and self.provider.currentIndex() == 1
+        self.api_label.setEnabled(google)
+        self.api_key.setEnabled(google)
+        self.radius_label.setEnabled(google)
+        self.radius.setEnabled(google)
 
     def _choose_output(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -151,7 +187,8 @@ class POICollectorDialog(QDialog):
             return geom, (xmin, ymin, xmax, ymax)
 
         layer = self.iface.activeLayer()
-        if not layer or layer.type() != layer.VectorLayer or QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.GeometryType.PolygonGeometry:
+        if (not layer or layer.type() != layer.VectorLayer or
+                QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.GeometryType.PolygonGeometry):
             raise Exception("Activate a polygon layer first.")
 
         feats = list(layer.selectedFeatures()) or list(layer.getFeatures())
@@ -201,32 +238,66 @@ class POICollectorDialog(QDialog):
 
         return body
 
-    def _fetch_osm(self, bbox, category):
-        xmin, ymin, xmax, ymax = bbox
-        # Map friendly names to OSM tags
+    @staticmethod
+    def _osm_point_tag(category):
         catmap = {
-            "hospital": ('amenity', 'hospital'),
-            "clinic": ('amenity', 'clinic'),
-            "pharmacy": ('amenity', 'pharmacy'),
-            "school": ('amenity', 'school'),
-            "university": ('amenity', 'university'),
-            "place_of_worship": ('amenity', 'place_of_worship'),
-            "bank": ('amenity', 'bank'),
-            "atm": ('amenity', 'atm'),
-            "restaurant": ('amenity', 'restaurant'),
-            "cafe": ('amenity', 'cafe'),
-            "marketplace": ('amenity', 'marketplace'),
-            "fuel": ('amenity', 'fuel'),
-            "police": ('amenity', 'police'),
-            "fire_station": ('amenity', 'fire_station'),
-            "government": ('office', 'government'),
-            "hotel": ('tourism', 'hotel'),
+            "hospital": ('amenity', 'hospital'), "clinic": ('amenity', 'clinic'),
+            "pharmacy": ('amenity', 'pharmacy'), "school": ('amenity', 'school'),
+            "university": ('amenity', 'university'), "place_of_worship": ('amenity', 'place_of_worship'),
+            "bank": ('amenity', 'bank'), "atm": ('amenity', 'atm'),
+            "restaurant": ('amenity', 'restaurant'), "cafe": ('amenity', 'cafe'),
+            "marketplace": ('amenity', 'marketplace'), "fuel": ('amenity', 'fuel'),
+            "police": ('amenity', 'police'), "fire_station": ('amenity', 'fire_station'),
+            "government": ('office', 'government'), "hotel": ('tourism', 'hotel'),
             "tourism": ('tourism', '')
         }
-        key, value = catmap.get(category, ('amenity', category))
-        tag = f'["{key}"]' if value == "" else f'["{key}"="{value}"]'
-        s, w, n, e = ymin, xmin, ymax, xmax
+        return catmap.get(category, ('amenity', category))
 
+    @staticmethod
+    def _osm_linear_tag(category):
+        return {
+            "roads": ('highway', ''),
+            "rivers": ('waterway', 'river'),
+            "railways": ('railway', ''),
+            "paths": ('highway', 'path'),
+            "coastline": ('natural', 'coastline')
+        }[category]
+
+    @staticmethod
+    def _osm_polygon_tag(category):
+        return {
+            "buildings": ('building', ''),
+            "landuse": ('landuse', ''),
+            "water": ('natural', 'water'),
+            "forest": ('landuse', 'forest'),
+            "residential": ('landuse', 'residential'),
+            "industrial": ('landuse', 'industrial'),
+            "commercial": ('landuse', 'commercial'),
+            "park": ('leisure', 'park')
+        }[category]
+
+    @staticmethod
+    def _tag_expression(key, value):
+        return f'["{key}"]' if value == "" else f'["{key}"="{value}"]'
+
+    def _overpass(self, query, timeout_ms=90000):
+        data = QUrl.toPercentEncoding(query)
+        payload = QByteArray(b"data=") + data
+        headers = {
+            b"Content-Type": b"application/x-www-form-urlencoded; charset=UTF-8",
+            b"User-Agent": b"GeoPOI-Collector/1.1.0"
+        }
+        raw_response = self._network_post(
+            "https://overpass-api.de/api/interpreter", payload, headers,
+            timeout_ms=timeout_ms, error_prefix="OpenStreetMap Overpass"
+        )
+        return json.loads(raw_response.decode("utf-8"))
+
+    def _fetch_osm_points(self, bbox, category):
+        xmin, ymin, xmax, ymax = bbox
+        key, value = self._osm_point_tag(category)
+        tag = self._tag_expression(key, value)
+        s, w, n, e = ymin, xmin, ymax, xmax
         query = f"""
         [out:json][timeout:60];
         (
@@ -236,20 +307,7 @@ class POICollectorDialog(QDialog):
         );
         out center tags;
         """
-        data = QUrl.toPercentEncoding(query)
-        payload = QByteArray(b"data=") + data
-        headers = {
-            b"Content-Type": b"application/x-www-form-urlencoded; charset=UTF-8",
-            b"User-Agent": b"GeoPOI-Collector/1.0.5"
-        }
-        raw_response = self._network_post(
-            "https://overpass-api.de/api/interpreter",
-            payload,
-            headers,
-            timeout_ms=90000
-        )
-        obj = json.loads(raw_response.decode("utf-8"))
-
+        obj = self._overpass(query)
         out = []
         for el in obj.get("elements", []):
             if "lat" in el and "lon" in el:
@@ -258,19 +316,76 @@ class POICollectorDialog(QDialog):
                 lat, lon = el["center"].get("lat"), el["center"].get("lon")
             else:
                 continue
+            if lat is None or lon is None:
+                continue
             tags = el.get("tags", {})
             out.append({
-                "provider": "OSM",
-                "id": str(el.get("id", "")),
+                "provider": "OSM", "id": str(el.get("id", "")),
                 "name": tags.get("name", ""),
                 "category": value or tags.get(key, key),
-                "address": self._osm_address(tags),
-                "lat": float(lat),
-                "lon": float(lon),
-                "rating": None,
-                "reviews": None
+                "address": self._osm_address(tags), "lat": float(lat),
+                "lon": float(lon), "rating": None, "reviews": None
             })
         return out
+
+    def _fetch_osm_lines(self, bbox, category):
+        xmin, ymin, xmax, ymax = bbox
+        key, value = self._osm_linear_tag(category)
+        tag = self._tag_expression(key, value)
+        s, w, n, e = ymin, xmin, ymax, xmax
+        query = f"""
+        [out:json][timeout:90];
+        way{tag}({s},{w},{n},{e});
+        out geom tags;
+        """
+        obj = self._overpass(query, timeout_ms=120000)
+        rows = []
+        for el in obj.get("elements", []):
+            coords = el.get("geometry", [])
+            if len(coords) < 2:
+                continue
+            points = [QgsPointXY(float(c["lon"]), float(c["lat"])) for c in coords if "lat" in c and "lon" in c]
+            if len(points) < 2:
+                continue
+            tags = el.get("tags", {})
+            rows.append({
+                "provider": "OSM", "id": str(el.get("id", "")),
+                "name": tags.get("name", ""),
+                "category": value or tags.get(key, key),
+                "osm_type": "way", "geometry": QgsGeometry.fromPolylineXY(points)
+            })
+        return rows
+
+    def _fetch_osm_polygons(self, bbox, category):
+        xmin, ymin, xmax, ymax = bbox
+        key, value = self._osm_polygon_tag(category)
+        tag = self._tag_expression(key, value)
+        s, w, n, e = ymin, xmin, ymax, xmax
+        query = f"""
+        [out:json][timeout:90];
+        way{tag}({s},{w},{n},{e});
+        out geom tags;
+        """
+        obj = self._overpass(query, timeout_ms=120000)
+        rows = []
+        for el in obj.get("elements", []):
+            coords = el.get("geometry", [])
+            if len(coords) < 4:
+                continue
+            points = [QgsPointXY(float(c["lon"]), float(c["lat"])) for c in coords if "lat" in c and "lon" in c]
+            if len(points) < 4:
+                continue
+            # Only closed OSM ways are safe to interpret as polygons.
+            if points[0].x() != points[-1].x() or points[0].y() != points[-1].y():
+                continue
+            tags = el.get("tags", {})
+            rows.append({
+                "provider": "OSM", "id": str(el.get("id", "")),
+                "name": tags.get("name", ""),
+                "category": value or tags.get(key, key),
+                "osm_type": "way", "geometry": QgsGeometry.fromPolygonXY([points])
+            })
+        return rows
 
     @staticmethod
     def _osm_address(tags):
@@ -284,11 +399,9 @@ class POICollectorDialog(QDialog):
     def _grid_centers(self, bbox, radius_m):
         xmin, ymin, xmax, ymax = bbox
         mid_lat = (ymin + ymax) / 2.0
-        # spacing ~ 1.4 radius gives overlap
         step_m = max(radius_m * 1.35, 500)
         dlat = step_m / 111320.0
         dlon = step_m / (111320.0 * max(math.cos(math.radians(mid_lat)), 0.2))
-
         pts = []
         y = ymin
         while y <= ymax:
@@ -297,50 +410,29 @@ class POICollectorDialog(QDialog):
                 pts.append((y, x))
                 x += dlon
             y += dlat
-        # ensure at least center
         if not pts:
-            pts = [((ymin+ymax)/2, (xmin+xmax)/2)]
+            pts = [((ymin + ymax) / 2, (xmin + xmax) / 2)]
         return pts
 
     def _fetch_google(self, bbox, category, api_key, radius_m):
         if not api_key:
             raise Exception("Enter your Google Places API key.")
-
         centers = self._grid_centers(bbox, radius_m)
         results = {}
         self.progress.setRange(0, max(len(centers), 1))
-
         type_map = {
-            "hospital": "hospital",
-            "clinic": "medical_clinic",
-            "pharmacy": "pharmacy",
-            "school": "school",
-            "university": "university",
-            "place_of_worship": "place_of_worship",
-            "bank": "bank",
-            "atm": "atm",
-            "restaurant": "restaurant",
-            "cafe": "cafe",
-            "marketplace": "market",
-            "fuel": "gas_station",
-            "police": "police",
-            "fire_station": "fire_station",
-            "government": "government_office",
-            "hotel": "hotel",
-            "tourism": "tourist_attraction"
+            "hospital": "hospital", "clinic": "medical_clinic", "pharmacy": "pharmacy",
+            "school": "school", "university": "university", "place_of_worship": "place_of_worship",
+            "bank": "bank", "atm": "atm", "restaurant": "restaurant", "cafe": "cafe",
+            "marketplace": "market", "fuel": "gas_station", "police": "police",
+            "fire_station": "fire_station", "government": "government_office",
+            "hotel": "hotel", "tourism": "tourist_attraction"
         }
         included_type = type_map.get(category, category)
-
         for i, (lat, lon) in enumerate(centers, start=1):
             body = {
-                "includedTypes": [included_type],
-                "maxResultCount": 20,
-                "locationRestriction": {
-                    "circle": {
-                        "center": {"latitude": lat, "longitude": lon},
-                        "radius": float(radius_m)
-                    }
-                }
+                "includedTypes": [included_type], "maxResultCount": 20,
+                "locationRestriction": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": float(radius_m)}}
             }
             raw = QByteArray(json.dumps(body).encode("utf-8"))
             headers = {
@@ -349,14 +441,10 @@ class POICollectorDialog(QDialog):
                 b"X-Goog-FieldMask": b"places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.primaryType"
             }
             raw_response = self._network_post(
-                "https://places.googleapis.com/v1/places:searchNearby",
-                raw,
-                headers,
-                timeout_ms=60000,
-                error_prefix="Google Places"
+                "https://places.googleapis.com/v1/places:searchNearby", raw, headers,
+                timeout_ms=60000, error_prefix="Google Places"
             )
             obj = json.loads(raw_response.decode("utf-8"))
-
             for p in obj.get("places", []):
                 loc = p.get("location", {})
                 pid = p.get("id", "")
@@ -364,55 +452,78 @@ class POICollectorDialog(QDialog):
                     continue
                 dn = p.get("displayName", {})
                 results[pid] = {
-                    "provider": "Google",
-                    "id": pid,
-                    "name": dn.get("text", ""),
-                    "category": p.get("primaryType", included_type),
-                    "address": p.get("formattedAddress", ""),
-                    "lat": float(loc["latitude"]),
-                    "lon": float(loc["longitude"]),
-                    "rating": p.get("rating"),
-                    "reviews": p.get("userRatingCount")
+                    "provider": "Google", "id": pid, "name": dn.get("text", ""),
+                    "category": p.get("primaryType", included_type), "address": p.get("formattedAddress", ""),
+                    "lat": float(loc["latitude"]), "lon": float(loc["longitude"]),
+                    "rating": p.get("rating"), "reviews": p.get("userRatingCount")
                 }
             self.progress.setValue(i)
-
         return list(results.values())
 
-    def _make_layer(self, rows, area_geom=None, layer_name="GeoPOI_Result"):
+    def _make_point_layer(self, rows, area_geom=None, layer_name="GeoPOI_Result"):
         layer = QgsVectorLayer("Point?crs=EPSG:4326", layer_name, "memory")
         pr = layer.dataProvider()
         fields = QgsFields()
-        fields.append(QgsField("provider", QVariant.String))
-        fields.append(QgsField("poi_id", QVariant.String))
-        fields.append(QgsField("name", QVariant.String))
-        fields.append(QgsField("category", QVariant.String))
-        fields.append(QgsField("address", QVariant.String))
-        fields.append(QgsField("latitude", QVariant.Double))
-        fields.append(QgsField("longitude", QVariant.Double))
-        fields.append(QgsField("rating", QVariant.Double))
-        fields.append(QgsField("reviews", QVariant.Int))
+        for name, typ in [
+            ("provider", QVariant.String), ("poi_id", QVariant.String), ("name", QVariant.String),
+            ("category", QVariant.String), ("address", QVariant.String), ("latitude", QVariant.Double),
+            ("longitude", QVariant.Double), ("rating", QVariant.Double), ("reviews", QVariant.Int)
+        ]:
+            fields.append(QgsField(name, typ))
         pr.addAttributes(fields)
         layer.updateFields()
-
         feats = []
         for r in rows:
-            pt = QgsPointXY(r["lon"], r["lat"])
-            g = QgsGeometry.fromPointXY(pt)
+            g = QgsGeometry.fromPointXY(QgsPointXY(r["lon"], r["lat"]))
             if self.only_inside.isChecked() and area_geom is not None and not area_geom.contains(g):
                 continue
             f = QgsFeature(layer.fields())
             f.setGeometry(g)
             f.setAttributes([
-                r.get("provider",""), r.get("id",""), r.get("name",""),
-                r.get("category",""), r.get("address",""),
-                r.get("lat"), r.get("lon"), r.get("rating"), r.get("reviews")
+                r.get("provider", ""), r.get("id", ""), r.get("name", ""), r.get("category", ""),
+                r.get("address", ""), r.get("lat"), r.get("lon"), r.get("rating"), r.get("reviews")
+            ])
+            feats.append(f)
+        pr.addFeatures(feats)
+        layer.updateExtents()
+        QgsProject.instance().addMapLayer(layer)
+        return layer, len(feats)
+
+    def _make_osm_geometry_layer(self, rows, geometry_type, area_geom=None, layer_name="GeoOSM_Result"):
+        uri = "LineString?crs=EPSG:4326" if geometry_type == "Line" else "Polygon?crs=EPSG:4326"
+        layer = QgsVectorLayer(uri, layer_name, "memory")
+        pr = layer.dataProvider()
+        fields = QgsFields()
+        fields.append(QgsField("provider", QVariant.String))
+        fields.append(QgsField("osm_id", QVariant.String))
+        fields.append(QgsField("osm_type", QVariant.String))
+        fields.append(QgsField("name", QVariant.String))
+        fields.append(QgsField("category", QVariant.String))
+        pr.addAttributes(fields)
+        layer.updateFields()
+
+        feats = []
+        for r in rows:
+            g = QgsGeometry(r["geometry"])
+            if self.only_inside.isChecked() and area_geom is not None:
+                if not g.intersects(area_geom):
+                    continue
+                clipped = g.intersection(area_geom)
+                if clipped.isEmpty():
+                    continue
+                g = clipped
+            f = QgsFeature(layer.fields())
+            f.setGeometry(g)
+            f.setAttributes([
+                r.get("provider", "OSM"), r.get("id", ""), r.get("osm_type", "way"),
+                r.get("name", ""), r.get("category", "")
             ])
             feats.append(f)
 
         pr.addFeatures(feats)
         layer.updateExtents()
         QgsProject.instance().addMapLayer(layer)
-        return len(feats)
+        return layer, len(feats)
 
     def _save_layer_gpkg(self, layer, path):
         options = QgsVectorFileWriter.SaveVectorOptions()
@@ -420,9 +531,7 @@ class POICollectorDialog(QDialog):
         options.layerName = layer.name()
         options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
         ctx = QgsProject.instance().transformContext()
-        err, msg, _, _ = QgsVectorFileWriter.writeAsVectorFormatV3(
-            layer, path, ctx, options
-        )
+        err, msg, _, _ = QgsVectorFileWriter.writeAsVectorFormatV3(layer, path, ctx, options)
         if err != QgsVectorFileWriter.WriterError.NoError:
             raise Exception(f"Failed to save GeoPackage: {msg}")
 
@@ -430,28 +539,33 @@ class POICollectorDialog(QDialog):
         self.btn.setEnabled(False)
         try:
             area_geom, bbox = self._target_geometry_wgs84()
+            geometry_type = self.geometry_type.currentText()
             category = self.category.currentText().strip()
             if not category:
-                raise Exception("No POI category selected.")
+                raise Exception("No category selected.")
 
             self.progress.setValue(0)
+            provider_name = "OSM"
 
-            if self.provider.currentIndex() == 0:
+            if geometry_type == "Point":
+                if self.provider.currentIndex() == 0:
+                    self.progress.setRange(0, 0)
+                    rows = self._fetch_osm_points(bbox, category)
+                else:
+                    provider_name = "Google"
+                    rows = self._fetch_google(bbox, category, self.api_key.text().strip(), self.radius.value())
+                layer_name = f"GeoPOI_{provider_name}_{category}"
+                layer, count = self._make_point_layer(rows, area_geom, layer_name)
+            elif geometry_type == "Line":
                 self.progress.setRange(0, 0)
-                rows = self._fetch_osm(bbox, category)
+                rows = self._fetch_osm_lines(bbox, category)
+                layer_name = f"GeoOSM_Line_{category}"
+                layer, count = self._make_osm_geometry_layer(rows, "Line", area_geom, layer_name)
             else:
-                rows = self._fetch_google(
-                    bbox, category,
-                    self.api_key.text().strip(),
-                    self.radius.value()
-                )
-
-            self.progress.setRange(0, 100)
-            provider_name = "OSM" if self.provider.currentIndex() == 0 else "Google"
-            layer_name = "GeoPOI_" + provider_name + "_" + category
-
-            count = self._make_layer(rows, area_geom, layer_name=layer_name)
-            layer = QgsProject.instance().mapLayersByName(layer_name)[-1]
+                self.progress.setRange(0, 0)
+                rows = self._fetch_osm_polygons(bbox, category)
+                layer_name = f"GeoOSM_Polygon_{category}"
+                layer, count = self._make_osm_geometry_layer(rows, "Polygon", area_geom, layer_name)
 
             if self.auto_save.isChecked():
                 path = self.out_path.text().strip()
@@ -459,14 +573,16 @@ class POICollectorDialog(QDialog):
                     raise Exception("Choose a GeoPackage output file first.")
                 self._save_layer_gpkg(layer, path)
 
+            self.progress.setRange(0, 100)
             self.progress.setValue(100)
-
-            msg = f"{count} POIs were added to the QGIS layer."
+            noun = "features" if geometry_type != "Point" else "POIs"
+            msg = f"{count} {noun} were added to the QGIS layer."
+            if geometry_type == "Polygon":
+                msg += "\nPolygon mode currently uses closed OSM ways for reliable geometry creation."
             if self.auto_save.isChecked():
                 msg += "\nSaved to: " + self.out_path.text().strip()
             else:
                 msg += "\nTo save permanently: right-click the layer → Export → Save Features As."
-
             QMessageBox.information(self, "Completed", msg)
         except Exception as e:
             QMessageBox.critical(self, "GeoPOI Collector", str(e))

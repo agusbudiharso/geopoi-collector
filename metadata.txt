@@ -1,13 +1,14 @@
 [general]
 name=GeoPOI Collector
 qgisMinimumVersion=3.22
-description=Collect Points of Interest from OpenStreetMap Overpass and Google Places API into QGIS.
-version=1.0.5
+qgisMaximumVersion=4.99
+description=Collect Point, Line, and Polygon features from OpenStreetMap Overpass and Point POIs from Google Places API into QGIS.
+version=1.1.0
 author=Agus Santoso Budiharso
 email=agussbudiharso@gmail.com
-about=GeoPOI Collector creates QGIS point layers from POI services. OpenStreetMap/Overpass works without an API key. Google Places requires the user's own API key and is subject to Google Maps Platform terms and policies. The plugin does not scrape the Google Maps website.
+about=GeoPOI Collector creates QGIS Point, Line, and Polygon layers. OpenStreetMap/Overpass supports Point, Line, and Polygon collection without an API key. Google Places remains available for Point features using the user's own API key and is subject to Google Maps Platform terms and policies. The plugin does not scrape the Google Maps website.
 category=Vector
-tags=poi,openstreetmap,overpass,google places,gis,points of interest
+tags=poi,openstreetmap,overpass,google places,gis,points of interest,line,polygon,vector
 homepage=https://github.com/agusbudiharso/geopoi-collector
 repository=https://github.com/agusbudiharso/geopoi-collector
 tracker=https://github.com/agusbudiharso/geopoi-collector/issues
